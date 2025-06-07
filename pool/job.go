@@ -4,28 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 
 	"github.com/google/uuid"
 )
 
-type ExecutionFn func(ctx context.Context, workerID uuid.UUID) error
+type executionFunc func(ctx context.Context, workerID uuid.UUID) error
 
-type JobDescriptor struct {
+type jobDescriptor struct {
 	metadata map[string]string
 }
 
-type Job struct {
-	ID   uuid.UUID
-	Work ExecutionFn
-	Arg  string
-	Done chan struct{}
+type job struct {
+	ID       uuid.UUID
+	Work     executionFunc
+	Arg      string
+	Attempts uint
+	Done     chan struct{}
 }
 
-func createJob(argument string) Job {
-	j := Job{
-		ID:   uuid.New(),
-		Arg:  argument,
-		Done: make(chan struct{}),
+func createJob(argument string) job {
+	j := job{
+		ID:       uuid.New(),
+		Arg:      argument,
+		Attempts: 0,
+		Done:     make(chan struct{}),
 	}
 	j.Work = func(ctx context.Context, workerID uuid.UUID) error {
 		switch {
@@ -35,24 +38,31 @@ func createJob(argument string) Job {
 			return errors.New("can not work without an argument")
 		}
 
+		if randBool() {
+			return errors.New("error occurred during execution job")
+		}
+
 		fmt.Printf(
-			"Job «%s» was successfully finished by «%s».\n Result: %s\n",
+			"\t\tjob «%s» was successfully finished by «%s».\n\t\tResult: %s\n",
 			j.ID.String(), workerID, j.Arg)
 
 		return nil
 	}
 
-	fmt.Println("Initialized Job")
+	fmt.Println("Initialized job")
 
 	return j
 }
 
-func (j *Job) Exec(ctx context.Context, workerID uuid.UUID) error {
+func (j *job) exec(ctx context.Context, workerID uuid.UUID) error {
 	err := j.Work(ctx, workerID)
 	if err != nil {
-		fmt.Println(err)
 		return err
 	}
 
 	return nil
+}
+
+func randBool() bool {
+	return rand.Intn(2) == 1
 }

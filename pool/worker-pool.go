@@ -2,53 +2,60 @@ package pool
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-func worker(ctx context.Context, jobs <-chan Job, errCh chan<- error, done <-chan struct{}) {
+func (pool *workerPool) worker(ctx context.Context) {
+	var lastJobID uuid.UUID
 	id := uuid.New()
 
 	for {
 		select {
-		case <-done:
-			fmt.Printf(
-				"shutting down worker %s\n",
-				id.String(),
-			)
-
-			return
-		case job, ok := <-jobs:
+		case j, ok := <-pool.jobs:
 			if !ok {
-				fmt.Printf(
-					"channel with jobs was closed: worker %s returning...\n",
-					id,
-				)
-
+				fmt.Println("job channel closed, returning with no jobs")
 				return
 			}
 
-			err := job.Exec(ctx, id)
+			// Work Imitation
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)+500))
 
-			errCh <- NewHandleError(id, job.ID, "", err)
+			err := j.exec(ctx, id)
+			if err != nil {
+				if j.Attempts > pool.maxAttempts {
+					pool.ec.errCh <- handleError(id, j.ID, err)
+				} else if !pool.closed.Load() {
+					pool.jobs <- j
+					continue
+				}
+			}
+			lastJobID = j.ID
+
+			pool.wg.Done()
 			continue
 
 		case <-ctx.Done():
 			fmt.Printf(
-				"cancelled worker %s. error detail: %v\n",
+				"\t\tcancelled worker %s. error detail: %v, last done job %s\n",
 				id,
 				ctx.Err(),
+				lastJobID,
 			)
 
 			err := ctx.Err()
-			errCh <- NewHandleError(id, uuid.Nil, "", err)
+			pool.ec.errCh <- handleError(id, uuid.Nil, err)
 			return
 
 		case <-time.After(time.Second * 10):
 			fmt.Printf(
-				"timeout worker %s. returning with no jobs\n",
+				"\t\ttimeout worker %s. returning with no jobs\n",
 				id,
 			)
 
@@ -57,59 +64,81 @@ func worker(ctx context.Context, jobs <-chan Job, errCh chan<- error, done <-cha
 	}
 }
 
-type WorkerPool struct {
-	count int
-	jobs  chan Job
-	errCh chan error
-	done  chan struct{}
+type workerPool struct {
+	wg          sync.WaitGroup
+	ec          *errorCollector
+	m           *monitor
+	count       int
+	jobs        chan job
+	closed      atomic.Bool
+	maxAttempts uint
 }
 
-func NewWorkerPool(wc int) *WorkerPool {
-	return &WorkerPool{
-		count: wc,
-		jobs:  make(chan Job, wc),
-		errCh: make(chan error, wc),
-		done:  make(chan struct{}),
+func NewWorkerPool(wc int) Pooler {
+	wp := &workerPool{
+		wg:          sync.WaitGroup{},
+		ec:          newErrorCollector(),
+		count:       wc,
+		jobs:        make(chan job, wc),
+		closed:      atomic.Bool{},
+		maxAttempts: 5,
+	}
+
+	wp.m = newMonitor(4, wp)
+	return wp
+}
+
+func (pool *workerPool) Exec(argument string) error {
+	if pool == nil {
+		return errors.New("pool is unexpectedly nil")
+	}
+
+	if pool.closed.Load() {
+		return errors.New("pool is already closed")
+	}
+
+	pool.wg.Add(1)
+	j := createJob(argument)
+
+	select {
+	case pool.jobs <- j:
+		return nil
+	default:
+		return errors.New("job channel already closed")
 	}
 }
 
-func (pool *WorkerPool) Exec(argument string) {
-	job := createJob(argument)
+func (pool *workerPool) Start(ctx context.Context) {
+	wg := sync.WaitGroup{}
+	wg.Add(pool.count)
+	go pool.ec.errorCollecting()
 
-	go func() {
-		select {
-		case pool.jobs <- job:
-			return
-		case <-time.After(time.Second * 2):
-			return
-		}
-	}()
-}
+	ctx, cancel := context.WithCancel(ctx)
+	pool.m.cancel = cancel
 
-func (pool *WorkerPool) Start(ctx context.Context) {
-	go pool.errorCollecting()
 	for i := 0; i < pool.count; i++ {
-		go worker(ctx, pool.jobs, pool.errCh, pool.done)
+		go pool.worker(ctx)
+		wg.Done()
 	}
+	wg.Wait()
+
+	go pool.wait()
 }
 
-func (pool *WorkerPool) errorCollecting() {
-	var err []error
-	for {
-		select {
-		case hErr, ok := <-pool.errCh:
-			if !ok {
-				return
-			}
-
-			err = append(err, hErr)
-		}
-	}
+func (pool *workerPool) Stop() {
+	pool.closed.CompareAndSwap(false, true)
+	pool.m.monitor()
 }
 
-func (pool *WorkerPool) Stop() {
-	close(pool.jobs)
-	<-pool.done
-	close(pool.errCh)
-	close(pool.done)
+func (pool *workerPool) GetErrors() []error {
+	var errs []error
+	for _, err := range pool.ec.errors {
+		errs = append(errs, err)
+	}
+
+	return errs
+}
+
+func (pool *workerPool) wait() {
+	pool.wg.Wait()
 }
