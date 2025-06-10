@@ -24,7 +24,6 @@ func (m *monitor) monitor() {
 	for {
 		select {
 		case <-m.ticker.C:
-			fmt.Println("Ticked")
 			if len(m.pool.jobs) == 0 {
 				close(m.pool.jobs)
 				m.cancel()

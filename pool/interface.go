@@ -9,4 +9,7 @@ type Pooler interface {
 	GetErrors() []error
 	Start(ctx context.Context)
 	Stop()
+	AddWorkers(ctx context.Context, count int)
+	DeleteWorkers(count int)
+	Wait()
 }

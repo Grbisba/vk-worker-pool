@@ -10,7 +10,7 @@ import (
 
 func main() {
 	var (
-		tasksNum   = 20
+		tasksNum   = 1000
 		workersNum = 10
 	)
 
@@ -23,14 +23,12 @@ func main() {
 	fmt.Println("\tStarting jobs...")
 
 	for i := 0; i < tasksNum+1; i++ {
-		time.Sleep(time.Millisecond * 500)
 		err := wp.Exec(fmt.Sprintf("\tJob with number - %d", i))
 		if err != nil {
 			fmt.Println(err)
 		}
+		time.Sleep(time.Millisecond * 10)
 	}
-
-	wp.Stop()
 
 	errs := wp.GetErrors()
 
@@ -39,4 +37,6 @@ func main() {
 			fmt.Println(err)
 		}
 	}
+
+	wp.Wait()
 }
